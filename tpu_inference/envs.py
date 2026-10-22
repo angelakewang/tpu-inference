@@ -89,6 +89,9 @@ if TYPE_CHECKING:
     MOE_FOLD_ROUTING_INTO_DISPATCH: bool = False
     RAGGED_GATHER_MAX_ROW_SUBCHUNKS: int = 4
     RAGGED_GATHER_TRIM_ROWS: bool = True
+    MOE_GMM_EP_RAGGED_A2A: bool = False
+    MOE_RAGGED_A2A_CAPACITY_FACTOR: float = 2.0
+    MOE_RAGGED_A2A_DROPLESS: bool = True
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
     VLLM_INCREMENTAL_FP8_LOADING: bool = False
     TPU_MESH_SORT_BY_COORDS: bool = False
@@ -567,6 +570,28 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # off, the block-padded output goes straight to gmm_v2, skipping the copy.
     "RAGGED_GATHER_TRIM_ROWS":
     env_bool("RAGGED_GATHER_TRIM_ROWS", default=True),
+    # GMM_EP (expert-parallel GMM) dispatch / combine with two ragged
+    # all-to-alls instead of the all-gather of tokens and the reduce-scatter /
+    # all-reduce of outputs: each device sends a copy of a token only to the
+    # devices that own its top-k experts, and gets the expert outputs back.
+    # Tokens stay sharded over all devices. Only the expert-parallel GMM path
+    # uses it (not GMM_TP, FUSED_MOE or USE_GMM_FUSED_RS_KERNEL), and not when
+    # the caller defers the all-reduce. Also sets the step function compiler
+    # option xla_tpu_force_custom_barrier_for_ragged_all_to_all=false, which
+    # the prefill programs need. See fused_moe_gmm.py.
+    "MOE_GMM_EP_RAGGED_A2A":
+    env_bool("MOE_GMM_EP_RAGGED_A2A", default=False),
+    # Receive buffer rows per device for MOE_GMM_EP_RAGGED_A2A, as a multiple
+    # of the rows (tokens x top-k) each device sends; rounded up to a multiple
+    # of 512.
+    "MOE_RAGGED_A2A_CAPACITY_FACTOR":
+    lambda: float(os.getenv("MOE_RAGGED_A2A_CAPACITY_FACTOR") or "2.0"),
+    # With MOE_GMM_EP_RAGGED_A2A, rows beyond the receive capacity (skewed
+    # routing) are sent in extra all-to-all rounds, so none is dropped. The
+    # extra rounds only run on steps where some device overflows. 0 drops
+    # them instead (for comparison only: it changes the outputs).
+    "MOE_RAGGED_A2A_DROPLESS":
+    env_bool("MOE_RAGGED_A2A_DROPLESS", default=True),
     # Gap between token-bucket padding sizes for TPU precompilation. When 0,
     # buckets grow as powers of two; otherwise buckets increase by this gap
     # once past the power-of-two ramp. Previously provided by vllm.envs, which
